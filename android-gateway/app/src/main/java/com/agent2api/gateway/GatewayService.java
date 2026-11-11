@@ -429,14 +429,20 @@ public final class GatewayService extends Service {
         if (!bin.isDirectory() && !bin.mkdirs()) throw new IOException("无法创建插件 bin 目录");
         File entry = new File(bin, "agent2api-providers");
         String target = library.getAbsolutePath();
-        if (entry.exists()) {
-            String current = null;
-            try {
-                current = Os.readlink(entry.getAbsolutePath());
-            } catch (ErrnoException ignored) {
-                // 不是符号链接（例如用户真把二进制放回来了）：删掉重建
-            }
+        String current = null;
+        try {
+            current = Os.readlink(entry.getAbsolutePath());
+        } catch (ErrnoException ignored) {
+            // 不是符号链接
+        }
+        if (current != null) {
+            // 覆盖安装后 APK 的 nativeLibraryDir 会换路径，旧链接会变成断链；
+            // File.exists() 对断链返回 false，所以必须先 readlink 再判断。
             if (target.equals(current)) return;
+            //noinspection ResultOfMethodCallIgnored
+            entry.delete();
+        } else if (entry.exists()) {
+            // 用户真把二进制放回来了：删掉，统一走 APK 内置的只读可执行文件
             //noinspection ResultOfMethodCallIgnored
             entry.delete();
         }
