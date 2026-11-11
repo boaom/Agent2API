@@ -41,6 +41,13 @@ jobs:
           sdkmanager --install "ndk;28.2.13676358" "platform-tools"
           test -d "$ANDROID_HOME/ndk/28.2.13676358"
 
+      - name: Checkout provider plugin source
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch v3.4.2 \
+            https://github.com/ProvidersPlugin/Agent2Providers.git plugin-src
+          test -f plugin-src/pack.json
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,7 +56,9 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: desktop-tauri/src-tauri -> ../../target
+          workspaces: |
+            desktop-tauri/src-tauri -> ../../target
+            plugin-src -> target
           shared-key: android-gateway
 
       - name: Build gateway for Android
@@ -75,6 +84,23 @@ jobs:
             "$OUTPUT/libagent2api_server.so"
           "$TOOLCHAIN/llvm-strip" --strip-all "$OUTPUT/libagent2api_server.so"
 
+          # 提供商插件是独立可执行文件：同样编成 Android 原生 PIE，
+          # 以 libagent2api_providers.so 的形式放进 jniLibs。
+          cd "$GITHUB_WORKSPACE/plugin-src"
+          cargo build --release --locked -p agent2api-providers --bin agent2api-providers \
+            --target aarch64-linux-android
+          cp target/aarch64-linux-android/release/agent2api-providers \
+            "$OUTPUT/libagent2api_providers.so"
+          "$TOOLCHAIN/llvm-strip" --strip-all "$OUTPUT/libagent2api_providers.so"
+
+          # 插件清单与 UI 作为 App assets 一起打包（UI 只有约 100KB）。
+          PLUGIN_ASSETS="$GITHUB_WORKSPACE/android-gateway/app/src/main/assets/plugin"
+          rm -rf "$PLUGIN_ASSETS"
+          mkdir -p "$PLUGIN_ASSETS"
+          cp pack.json "$PLUGIN_ASSETS/pack.json"
+          cp -a ui "$PLUGIN_ASSETS/ui"
+          if [ -d assets ]; then cp -a assets "$PLUGIN_ASSETS/assets"; fi
+
           "$CC_aarch64_linux_android" -O2 -fPIE -pie -Wall -Wextra \
             -Wl,-z,max-page-size=16384 \
             -o "$OUTPUT/libagent2api_launcher.so" \
@@ -82,13 +108,21 @@ jobs:
           "$TOOLCHAIN/llvm-strip" --strip-all "$OUTPUT/libagent2api_launcher.so"
 
           file "$OUTPUT"/*.so
-          ls -lh "$OUTPUT"
+          ls -lh "$OUTPUT" "$PLUGIN_ASSETS"
 
       - name: Upload server binaries
         uses: actions/upload-artifact@v4
         with:
           name: agent2api-android-binaries
           path: android-gateway/app/src/main/jniLibs/arm64-v8a/*.so
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload provider pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent2api-provider-pack
+          path: android-gateway/app/src/main/assets/plugin
           if-no-files-found: error
           retention-days: 14
 
@@ -125,14 +159,22 @@ jobs:
           name: agent2api-android-binaries
           path: android-gateway/app/src/main/jniLibs/arm64-v8a
 
+      - name: Download provider pack
+        uses: actions/download-artifact@v4
+        with:
+          name: agent2api-provider-pack
+          path: android-gateway/app/src/main/assets/plugin
+
       - name: Bundle panel UI
         run: |
           set -euxo pipefail
           test -f android-gateway/app/src/main/jniLibs/arm64-v8a/libagent2api_server.so
+          test -f android-gateway/app/src/main/jniLibs/arm64-v8a/libagent2api_providers.so
+          test -f android-gateway/app/src/main/assets/plugin/pack.json
           test -f desktop-tauri/ui/index.html
           mkdir -p android-gateway/app/src/main/assets/ui
           cp -a desktop-tauri/ui/. android-gateway/app/src/main/assets/ui/
-          du -sh android-gateway/app/src/main/assets/ui
+          du -sh android-gateway/app/src/main/assets/ui android-gateway/app/src/main/assets/plugin
 
       - name: Prepare signing
         id: signing
@@ -194,7 +236,7 @@ jobs:
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
           "$APKSIGNER" verify --verbose --print-certs "$OUT" | tee "dist/Agent2API-Gateway-${VERSION}-signature.txt"
 
-          unzip -l "$OUT" | grep -E 'lib/arm64-v8a/libagent2api_(server|launcher)\.so|assets/ui/index.html' \
+          unzip -l "$OUT" | grep -E 'lib/arm64-v8a/libagent2api_(server|launcher|providers)\.so|assets/ui/index.html|assets/plugin/pack\.json' \
             | tee "dist/Agent2API-Gateway-${VERSION}-contents.txt"
           sha256sum "$OUT" | tee "dist/Agent2API-Gateway-${VERSION}.apk.sha256"
           ls -lh dist

@@ -13,8 +13,14 @@ import android.content.res.AssetManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.SystemClock;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.util.Log;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -53,6 +59,9 @@ public final class GatewayService extends Service {
     private static final String TAG = "Agent2APIGateway";
     private static final String LAUNCHER = "libagent2api_launcher.so";
     private static final String SERVER = "libagent2api_server.so";
+    private static final String PLUGIN_ID = "agent2api-providers";
+    private static final String PLUGIN_LIB = "libagent2api_providers.so";
+    private static final String PLUGIN_ENTRY = "bin/agent2api-providers";
 
     private final Object lock = new Object();
     private Process process;
@@ -233,6 +242,12 @@ public final class GatewayService extends Service {
                     throw new IOException("无法创建数据目录 " + home);
                 }
                 File ui = prepareUi(home);
+                try {
+                    prepareBundledPlugin(home);
+                } catch (Exception pluginError) {
+                    // 插件是可选增强：装不上也要让网关本体起来，面板才能显示原因/重装。
+                    Log.e(TAG, "prepare bundled provider plugin failed", pluginError);
+                }
                 File log = logFile(this);
                 if (log.length() > 8L * 1024 * 1024) {
                     // 防止反复崩溃把日志无限写大
@@ -363,6 +378,162 @@ public final class GatewayService extends Service {
             } catch (Exception ignored) {
             }
             Log.w(TAG, "stop gateway failed", error);
+        }
+    }
+
+    private void prepareBundledPlugin(File home) throws Exception {
+        AssetManager assets = getAssets();
+        JSONObject manifest;
+        try (InputStream ignored = assets.open("plugin/pack.json")) {
+            manifest = new JSONObject(readAssetText(assets, "plugin/pack.json"));
+        } catch (IOException missing) {
+            // 这个 APK 没带插件资源：网关仍能启动，只是没有提供商。
+            Log.w(TAG, "bundled provider pack not found in APK");
+            return;
+        }
+
+        String version = manifest.optString("version", "");
+        if (version.isEmpty()) throw new IOException("插件 pack.json 缺少 version");
+        File pluginsRoot = new File(home, "plugins");
+        if (!pluginsRoot.isDirectory() && !pluginsRoot.mkdirs()) {
+            throw new IOException("无法创建插件目录 " + pluginsRoot);
+        }
+        File versionDir = new File(new File(pluginsRoot, PLUGIN_ID), version);
+        File marker = new File(pluginsRoot, ".bundled-" + PLUGIN_ID + "-" + version);
+
+        if (!marker.isFile()) {
+            state = "extracting";
+            updateNotification("首次启动，正在安装提供商插件…");
+            if (versionDir.exists()) deleteRecursively(versionDir);
+            if (!versionDir.mkdirs() && !versionDir.isDirectory()) {
+                throw new IOException("无法创建插件版本目录 " + versionDir);
+            }
+            copyAsset(assets, "plugin/pack.json", new File(versionDir, "pack.json"));
+            copyAssetDir(assets, "plugin/ui", new File(versionDir, "ui"));
+            if (assetExists(assets, "plugin/assets")) {
+                copyAssetDir(assets, "plugin/assets", new File(versionDir, "assets"));
+            }
+            writePluginRegistry(pluginsRoot, manifest, version);
+            writeText(marker, "installed");
+            Log.i(TAG, "bundled provider pack installed: " + version);
+        } else if (!versionDir.isDirectory()) {
+            // 用户从面板卸载了插件：不因为重启又给它装回来。
+            return;
+        }
+
+        File library = new File(getApplicationInfo().nativeLibraryDir, PLUGIN_LIB);
+        if (!library.isFile() || !library.canExecute()) {
+            throw new IOException("APK 内缺少可执行的 " + PLUGIN_LIB + "：" + library);
+        }
+        File bin = new File(versionDir, "bin");
+        if (!bin.isDirectory() && !bin.mkdirs()) throw new IOException("无法创建插件 bin 目录");
+        File entry = new File(bin, "agent2api-providers");
+        String target = library.getAbsolutePath();
+        if (entry.exists()) {
+            String current = null;
+            try {
+                current = Os.readlink(entry.getAbsolutePath());
+            } catch (ErrnoException ignored) {
+                // 不是符号链接（例如用户真把二进制放回来了）：删掉重建
+            }
+            if (target.equals(current)) return;
+            //noinspection ResultOfMethodCallIgnored
+            entry.delete();
+        }
+        try {
+            Os.symlink(target, entry.getAbsolutePath());
+            Log.i(TAG, "provider plugin linked: " + entry + " -> " + target);
+        } catch (ErrnoException error) {
+            throw new IOException("无法创建插件符号链接（Android 的可执行文件限制）：" + error.getMessage(), error);
+        }
+    }
+
+    private void writePluginRegistry(File pluginsRoot, JSONObject manifest, String version)
+        throws Exception {
+        File registryFile = new File(pluginsRoot, "plugins.json");
+        JSONObject registry = new JSONObject();
+        JSONArray packs = new JSONArray();
+        JSONObject previousPack = null;
+        if (registryFile.isFile()) {
+            try {
+                JSONObject existing = new JSONObject(readText(registryFile));
+                JSONArray existingPacks = existing.optJSONArray("packs");
+                if (existingPacks != null) {
+                    for (int i = 0; i < existingPacks.length(); i++) {
+                        JSONObject item = existingPacks.optJSONObject(i);
+                        if (item == null) continue;
+                        if (PLUGIN_ID.equals(item.optString("id"))) {
+                            previousPack = item;
+                        } else {
+                            packs.put(item);
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // 损坏的注册表按空表处理，和网关自己的行为一致
+            }
+        }
+
+        JSONObject providerStates = new JSONObject();
+        JSONArray manifestProviders = new JSONArray();
+        JSONArray declared = manifest.optJSONArray("providers");
+        JSONObject previousStates = previousPack == null ? null : previousPack.optJSONObject("providers");
+        if (declared != null) {
+            for (int i = 0; i < declared.length(); i++) {
+                JSONObject provider = declared.optJSONObject(i);
+                if (provider == null) continue;
+                String id = provider.optString("id", "");
+                if (id.isEmpty()) continue;
+                boolean enabled = previousStates != null && previousStates.has(id)
+                    ? previousStates.optBoolean(id)
+                    : provider.optBoolean("default_enabled", true);
+                providerStates.put(id, enabled);
+                JSONObject entry = new JSONObject();
+                entry.put("id", id);
+                entry.put("label", provider.optString("label", id));
+                entry.put("order", provider.optInt("order", i));
+                entry.put("default_enabled", provider.optBoolean("default_enabled", true));
+                manifestProviders.put(entry);
+            }
+        }
+
+        JSONObject pack = new JSONObject();
+        pack.put("id", PLUGIN_ID);
+        pack.put("version", version);
+        pack.put("enabled", previousPack == null || previousPack.optBoolean("enabled", true));
+        pack.put("providers", providerStates);
+        pack.put("entry", PLUGIN_ENTRY);
+        pack.put("sha256", "");
+        pack.put("signed", false);
+        pack.put("installed_at", System.currentTimeMillis());
+        pack.put("manifest_providers", manifestProviders);
+        packs.put(pack);
+        registry.put("packs", packs);
+        writeText(registryFile, registry.toString());
+    }
+
+    private static boolean assetExists(AssetManager assets, String path) {
+        try {
+            String[] list = assets.list(path);
+            return list != null && list.length > 0;
+        } catch (IOException ignored) {
+            return false;
+        }
+    }
+
+    private static void copyAsset(AssetManager assets, String path, File destination) throws IOException {
+        try (InputStream input = assets.open(path)) {
+            copyFile(input, destination);
+        }
+    }
+
+    private static String readAssetText(AssetManager assets, String path) throws IOException {
+        try (InputStream input = assets.open(path);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
         }
     }
 

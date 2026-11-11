@@ -6,6 +6,7 @@ local.properties
 
 # CI 注入的运行时资源
 app/src/main/assets/ui/
+app/src/main/assets/plugin/
 app/src/main/jniLibs/
 
 # 签名材料
