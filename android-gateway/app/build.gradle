@@ -1,0 +1,65 @@
+plugins {
+    id 'com.android.application'
+}
+
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace 'com.agent2api.gateway'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.agent2api.gateway'
+        minSdk 26
+        targetSdk 36
+        versionCode 30402
+        versionName '3.4.2-gateway'
+    }
+
+    signingConfigs {
+        release {
+            storeFile file(keystoreProperties['storeFile'] ?: '../agent2api-release.jks')
+            storePassword keystoreProperties['storePassword']
+            keyAlias keystoreProperties['keyAlias']
+            keyPassword keystoreProperties['keyPassword']
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // 网关二进制以 libagent2api_server.so 的形式放进 jniLibs。必须让系统把它
+    // 解压到 nativeLibraryDir（可执行、且不在 App 可写目录里），否则 Android 10+
+    // 的 W^X 会阻止 ProcessBuilder 执行。
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+// 缺签名材料时在配置阶段就失败，不要拖到最后出一个未签名包。
+gradle.taskGraph.whenReady { graph ->
+    def buildsRelease = graph.allTasks.any { it.name.toLowerCase().contains('release') }
+    if (buildsRelease && !keystorePropertiesFile.exists()) {
+        throw new GradleException('缺少 android-gateway/keystore.properties（release 签名材料）')
+    }
+}

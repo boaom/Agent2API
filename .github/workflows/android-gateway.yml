@@ -1,0 +1,229 @@
+name: android-gateway-apk
+
+# 构建“网关跑在手机里”的独立 APK：
+#   1) 用 Android NDK 把 Rust 网关编成 aarch64-linux-android 可执行文件
+#   2) 作为 libagent2api_server.so 打进 APK 的 jniLibs
+#   3) 原生 Android 前台服务拉起它，WebView 打开本机 127.0.0.1:3065/m
+#
+# 不碰版本号、tag、Release。手动触发，或推送到 ci/android-gateway 分支时运行。
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/android-gateway
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-gateway-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: build aarch64 gateway binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: Install NDK
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;28.2.13676358" "platform-tools"
+          test -d "$ANDROID_HOME/ndk/28.2.13676358"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+          shared-key: android-gateway
+
+      - name: Build gateway for Android
+        run: |
+          set -euxo pipefail
+          NDK="${ANDROID_HOME}/ndk/28.2.13676358"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android26-clang"
+          export CXX_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android26-clang++"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export RANLIB_aarch64_linux_android="$TOOLCHAIN/llvm-ranlib"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
+          export CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+          OUTPUT="$GITHUB_WORKSPACE/android-gateway/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$OUTPUT"
+          cd desktop-tauri/src-tauri
+          cargo build --release --locked -p agent2api-server --bin agent2api-server \
+            --target aarch64-linux-android
+
+          cp "$GITHUB_WORKSPACE/target/aarch64-linux-android/release/agent2api-server" \
+            "$OUTPUT/libagent2api_server.so"
+          "$TOOLCHAIN/llvm-strip" --strip-all "$OUTPUT/libagent2api_server.so"
+
+          "$CC_aarch64_linux_android" -O2 -fPIE -pie -Wall -Wextra \
+            -Wl,-z,max-page-size=16384 \
+            -o "$OUTPUT/libagent2api_launcher.so" \
+            "$GITHUB_WORKSPACE/android-gateway/native/launcher.c"
+          "$TOOLCHAIN/llvm-strip" --strip-all "$OUTPUT/libagent2api_launcher.so"
+
+          file "$OUTPUT"/*.so
+          ls -lh "$OUTPUT"
+
+      - name: Upload server binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent2api-android-binaries
+          path: android-gateway/app/src/main/jniLibs/arm64-v8a/*.so
+          if-no-files-found: error
+          retention-days: 14
+
+  apk:
+    name: build gateway APK
+    needs: server
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: Install Android SDK packages
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Download gateway binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: agent2api-android-binaries
+          path: android-gateway/app/src/main/jniLibs/arm64-v8a
+
+      - name: Bundle panel UI
+        run: |
+          set -euxo pipefail
+          test -f android-gateway/app/src/main/jniLibs/arm64-v8a/libagent2api_server.so
+          test -f desktop-tauri/ui/index.html
+          mkdir -p android-gateway/app/src/main/assets/ui
+          cp -a desktop-tauri/ui/. android-gateway/app/src/main/assets/ui/
+          du -sh android-gateway/app/src/main/assets/ui
+
+      - name: Prepare signing
+        id: signing
+        working-directory: android-gateway
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > agent2api-release.jks
+            STORE_PASSWORD="${ANDROID_KEYSTORE_PASSWORD:?missing keystore password}"
+            KEY_ALIAS="${ANDROID_KEY_ALIAS:?missing key alias}"
+            KEY_PASSWORD="${ANDROID_KEY_PASSWORD:?missing key password}"
+            echo "key_source=repo-secret" >> "$GITHUB_OUTPUT"
+          else
+            STORE_PASSWORD="$(openssl rand -hex 24)"
+            KEY_PASSWORD="$STORE_PASSWORD"
+            KEY_ALIAS="agent2api"
+            keytool -genkeypair -v \
+              -keystore agent2api-release.jks -storetype JKS \
+              -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" -keypass "$KEY_PASSWORD" \
+              -keyalg RSA -keysize 3072 -validity 10000 \
+              -dname "CN=Agent2API CI, O=Agent2API, C=CN" >/dev/null 2>&1
+            echo "key_source=ephemeral-ci-key" >> "$GITHUB_OUTPUT"
+          fi
+          keytool -list -keystore agent2api-release.jks \
+            -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          {
+            printf 'storeFile=../agent2api-release.jks\n'
+            printf 'storePassword=%s\n' "$STORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+          } > keystore.properties
+
+      - name: Build APK
+        working-directory: android-gateway
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Collect and verify APK
+        id: collect
+        working-directory: android-gateway
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('../desktop-tauri/mobile/package.json').version" 2>/dev/null || true)"
+          if [ -z "$VERSION" ]; then VERSION="3.4.2"; fi
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK"
+          mkdir -p dist
+          OUT="dist/Agent2API-Gateway-${VERSION}.apk"
+          cp "$APK" "$OUT"
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          "$APKSIGNER" verify --verbose --print-certs "$OUT" | tee "dist/Agent2API-Gateway-${VERSION}-signature.txt"
+
+          unzip -l "$OUT" | grep -E 'lib/arm64-v8a/libagent2api_(server|launcher)\.so|assets/ui/index.html' \
+            | tee "dist/Agent2API-Gateway-${VERSION}-contents.txt"
+          sha256sum "$OUT" | tee "dist/Agent2API-Gateway-${VERSION}.apk.sha256"
+          ls -lh dist
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Write run summary
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.collect.outputs.version }}"
+          HASH="$(cut -d' ' -f1 android-gateway/dist/Agent2API-Gateway-${VERSION}.apk.sha256)"
+          {
+            echo '### Agent2API Gateway APK'
+            echo
+            echo "- Version: \`${VERSION}\`"
+            echo "- Signing: \`${{ steps.signing.outputs.key_source }}\`"
+            echo "- Package: \`com.agent2api.gateway\`"
+            echo "- SHA-256: \`${HASH}\`"
+            echo
+            echo 'Gateway binary + panel UI are embedded; the app starts it as a foreground service on port 3065.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-gateway-apk
+          path: |
+            android-gateway/dist/*.apk
+            android-gateway/dist/*.sha256
+            android-gateway/dist/*-signature.txt
+            android-gateway/dist/*-contents.txt
+          if-no-files-found: error
+          retention-days: 14

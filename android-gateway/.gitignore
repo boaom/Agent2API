@@ -1,0 +1,14 @@
+# App 构建产物
+build/
+app/build/
+.gradle/
+local.properties
+
+# CI 注入的运行时资源
+app/src/main/assets/ui/
+app/src/main/jniLibs/
+
+# 签名材料
+*.jks
+*.keystore
+keystore.properties

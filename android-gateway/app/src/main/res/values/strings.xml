@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Agent2API 网关</string>
+    <string name="channel_name">网关运行状态</string>
+    <string name="channel_description">保持 Agent2API 网关在后台运行</string>
+</resources>
