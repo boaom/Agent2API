@@ -6,6 +6,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -16,6 +17,7 @@ import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.Menu;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
@@ -28,6 +30,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -56,10 +59,12 @@ public final class MainActivity extends Activity {
     private boolean loaded = false;
     private boolean destroyed = false;
     private long startedAt = 0;
+    private String panelMode = "mobile";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        panelMode = panelMode(getIntent());
         requestNotificationPermission();
         setContentView(buildContent());
         GatewayService.start(this);
@@ -70,6 +75,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        String requested = panelMode(intent);
+        if (!requested.equals(panelMode)) {
+            panelMode = requested;
+            if (loaded && webView != null) loadPanel();
+        }
         if (!loaded) {
             GatewayService.start(this);
             pollOnce();
@@ -108,13 +118,43 @@ public final class MainActivity extends Activity {
     }
 
     private View buildContent() {
-        FrameLayout root = new FrameLayout(this);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(0xFFF3F3F6);
 
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setOrientation(LinearLayout.HORIZONTAL);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(16), 0, dp(8), 0);
+        toolbar.setBackgroundColor(0xFFFFFFFF);
+        toolbar.setElevation(dp(1));
+
+        TextView appTitle = new TextView(this);
+        appTitle.setText("Agent2API 网关");
+        appTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        appTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        appTitle.setTextColor(0xFF17171A);
+        toolbar.addView(appTitle, new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView menuButton = new TextView(this);
+        menuButton.setText("⋮");
+        menuButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        menuButton.setTextColor(0xFF33333A);
+        menuButton.setGravity(Gravity.CENTER);
+        menuButton.setPadding(dp(14), 0, dp(14), 0);
+        menuButton.setContentDescription("菜单");
+        menuButton.setOnClickListener(this::showMenu);
+        toolbar.addView(menuButton, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)));
+        root.addView(toolbar, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+
+        FrameLayout content = new FrameLayout(this);
         webView = new WebView(this);
         configureWebView(webView);
         webView.setVisibility(View.INVISIBLE);
-        root.addView(webView, new FrameLayout.LayoutParams(
+        content.addView(webView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         overlay = new LinearLayout(this);
@@ -191,8 +231,10 @@ public final class MainActivity extends Activity {
         card.addView(buttons, buttonsParams);
         overlay.addView(card, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(overlay, new FrameLayout.LayoutParams(
+        content.addView(overlay, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(content, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         return root;
     }
 
@@ -266,7 +308,66 @@ public final class MainActivity extends Activity {
         loaded = true;
         overlay.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
-        webView.loadUrl("http://127.0.0.1:" + GatewayService.PORT + "/m");
+        loadPanel();
+    }
+
+    private void loadPanel() {
+        boolean desktop = "desktop".equals(panelMode);
+        WebSettings settings = webView.getSettings();
+        settings.setUseWideViewPort(desktop);
+        settings.setLoadWithOverviewMode(desktop);
+        settings.setSupportZoom(desktop);
+        settings.setBuiltInZoomControls(desktop);
+        settings.setDisplayZoomControls(false);
+        webView.loadUrl("http://127.0.0.1:" + GatewayService.PORT + (desktop ? "/" : "/m"));
+    }
+
+    private void showMenu(View anchor) {
+        PopupMenu popup = new PopupMenu(this, anchor);
+        Menu menu = popup.getMenu();
+        menu.add(1, 1, 0, "手机面板").setChecked("mobile".equals(panelMode));
+        menu.add(1, 2, 1, "桌面面板").setChecked("desktop".equals(panelMode));
+        menu.setGroupCheckable(1, true, true);
+        menu.add(2, 3, 2, "在浏览器打开");
+        menu.add(2, 4, 3, "重启网关");
+        menu.add(2, 5, 4, "查看日志");
+        popup.setOnMenuItemClickListener(item -> {
+            switch (item.getItemId()) {
+                case 1:
+                case 2:
+                    panelMode = item.getItemId() == 2 ? "desktop" : "mobile";
+                    if (loaded) loadPanel();
+                    return true;
+                case 3:
+                    openInBrowser();
+                    return true;
+                case 4:
+                    retry();
+                    return true;
+                case 5:
+                    showLog();
+                    return true;
+                default:
+                    return false;
+            }
+        });
+        popup.show();
+    }
+
+    private void openInBrowser() {
+        String base = "http://127.0.0.1:" + GatewayService.PORT
+            + ("desktop".equals(panelMode) ? "/" : "/m");
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(base)));
+        } catch (Exception error) {
+            statusView.setText("没有可用的浏览器：" + error.getMessage());
+        }
+    }
+
+    private static String panelMode(Intent intent) {
+        if (intent == null) return "mobile";
+        String value = intent.getStringExtra("panel");
+        return "desktop".equals(value) ? "desktop" : "mobile";
     }
 
     private void updateStatus() {

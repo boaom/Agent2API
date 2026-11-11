@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutId="mobile"
+        android:shortcutLongLabel="@string/shortcut_mobile_long"
+        android:shortcutShortLabel="@string/shortcut_mobile">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.agent2api.gateway.MainActivity"
+            android:targetPackage="com.agent2api.gateway">
+            <extra
+                android:name="panel"
+                android:value="mobile" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutId="desktop"
+        android:shortcutLongLabel="@string/shortcut_desktop_long"
+        android:shortcutShortLabel="@string/shortcut_desktop">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.agent2api.gateway.MainActivity"
+            android:targetPackage="com.agent2api.gateway">
+            <extra
+                android:name="panel"
+                android:value="desktop" />
+        </intent>
+    </shortcut>
+</shortcuts>

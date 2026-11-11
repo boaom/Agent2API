@@ -199,6 +199,12 @@ public final class GatewayService extends Service {
         PendingIntent stopPending = PendingIntent.getService(
             this, 1, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
+        Intent desktop = new Intent(this, MainActivity.class)
+            .putExtra("panel", "desktop")
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent desktopPending = PendingIntent.getActivity(
+            this, 2, desktop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
         Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_gateway)
             .setContentTitle("Agent2API 网关")
@@ -208,6 +214,7 @@ public final class GatewayService extends Service {
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setColor(0xFF2F6FED)
+            .addAction(new Notification.Action.Builder(null, "桌面面板", desktopPending).build())
             .addAction(new Notification.Action.Builder(null, "停止", stopPending).build());
         return builder.build();
     }
