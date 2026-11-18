@@ -47,11 +47,11 @@ jobs:
           npm --prefix desktop-tauri/i18n ci --no-audit --no-fund
 
       # AGP 8.13 / Capacitor 8 要求 JDK 17
-      - name: 安装 JDK 17
+      - name: 安装 JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: 安装 Android SDK
         run: |
