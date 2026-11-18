@@ -1,0 +1,90 @@
+name: apk-build
+
+# 在本仓库直接编译 Android release APK（workflow_dispatch 手动触发）。
+#
+# ── 为什么在本仓库编，不走构建仓库派发 ───────────────────────
+# build.yml 的设计是推 v* tag 时用 BUILDER_DISPATCH_TOKEN 派发到
+# Agent2Builder/agent2api-releases 编译。但本仓库未配该 token，派发会失败。
+# 本仓库已配好 Android 签名的四个 secret（keystore + 密码），具备直接签名
+# 编译条件，因此这里直接在本仓库跑 Capacitor + Gradle 编译，产物作为本仓库
+# artifact，方便单包验证，不依赖构建仓库。
+#
+# ── 签名 ──────────────────────────────────────────────────
+# 从四个 secret 还原 keystore：
+#   ANDROID_KEYSTORE_BASE64   agent2api-release.jks 的 base64（单行）
+#   ANDROID_KEYSTORE_PASSWORD storePassword
+#   ANDROID_KEY_ALIAS         keyAlias
+#   ANDROID_KEY_PASSWORD      keyPassword
+# 密钥不得更换，否则已装用户无法覆盖升级。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            desktop-tauri/ui-kit/package-lock.json
+            desktop-tauri/ui-islands/package-lock.json
+            desktop-tauri/mobile/package-lock.json
+            desktop-tauri/i18n/package-lock.json
+
+      # ui-kit 必须装：mobile 的 vite alias 指到 ui-kit/src，漏装样式解析不到
+      # （tsc 会报 TS2307 级联错误）。四个包都按各自 lock 装齐。
+      - name: 安装依赖
+        run: |
+          npm --prefix desktop-tauri/ui-kit ci --no-audit --no-fund
+          npm --prefix desktop-tauri/ui-islands ci --no-audit --no-fund
+          npm --prefix desktop-tauri/mobile ci --no-audit --no-fund
+          npm --prefix desktop-tauri/i18n ci --no-audit --no-fund
+
+      # AGP 8.13 / Capacitor 8 要求 JDK 17
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      # build:native = tsc --noEmit && vite build --mode apk，产物落 android-www
+      # （capacitor.config.ts 的 webDir），cap sync 随后把它打进 assets
+      - name: 构建前端产物（android-www）
+        run: npm --prefix desktop-tauri/mobile run build:native
+
+      - name: 还原签名密钥
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > desktop-tauri/mobile/android/agent2api-release.jks
+          # 用 printf 而非 heredoc：避免 YAML 缩进把结束标记顶格吃掉
+          printf 'storeFile=../agent2api-release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" \
+            > desktop-tauri/mobile/android/keystore.properties
+
+      - name: Capacitor sync
+        run: cd desktop-tauri/mobile && npx cap sync android
+
+      - name: 构建 release APK
+        working-directory: desktop-tauri/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-apk
+          path: desktop-tauri/mobile/android/app/build/outputs/apk/release/*.apk
