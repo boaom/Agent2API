@@ -6,6 +6,7 @@ import { HiddenAccountsNotice } from '../components/HiddenAccountsNotice'
 import { Icon } from '../components/Icon'
 import { AccountSheet } from './AccountSheet'
 import { DynamicProviderSheet } from './add-account-dynamic-sheet'
+import { CustomProviderSheet } from './CustomProviderSheet'
 import {
   AccountsFilterSheet,
   DEFAULT_FILTERS,
@@ -55,6 +56,7 @@ export function AccountsPage() {
   const [query, setQuery] = useState('')
   const [openId, setOpenId] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  const [addingProvider, setAddingProvider] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [usage, setUsage] = useState<UsageSnapshot | null>(null)
@@ -256,6 +258,7 @@ export function AccountsPage() {
         actions={
           <>
             <Button variant='outline' size='sm' onClick={() => setAdding(true)}>{t('添加账号')}</Button>
+            <Button variant='outline' size='sm' onClick={() => setAddingProvider(true)}>{t('新建自定义提供商')}</Button>
             <Button size='icon-touch' variant='outline'
               type='button'
               className='m-icon-btn'
@@ -383,6 +386,10 @@ export function AccountsPage() {
 
       {adding ? <DynamicProviderSheet onClose={() => setAdding(false)} onAdded={() => {
         setAdding(false)
+        void load()
+      }} /> : null}
+      {addingProvider ? <CustomProviderSheet onClose={() => setAddingProvider(false)} onCreated={() => {
+        setAddingProvider(false)
         void load()
       }} /> : null}
       <AccountSheet
