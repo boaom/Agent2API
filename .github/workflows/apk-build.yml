@@ -54,7 +54,10 @@ jobs:
           java-version: '17'
 
       - name: 安装 Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          SDKM="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
 
       # build:native = tsc --noEmit && vite build --mode apk，产物落 android-www
       # （capacitor.config.ts 的 webDir），cap sync 随后把它打进 assets
